@@ -12,6 +12,11 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import { StatusBar } from 'expo-status-bar';
 import { elementPickerScript } from './src/utils/elementPicker';
+import { scraperScript } from './src/utils/scraper';
+import { useScraper } from './src/hooks/useScraper';
+
+// İki IIFE'yi tek bir injected string'de birleştir
+const injectedScripts = `${elementPickerScript}\n${scraperScript}`;
 
 function SelectorChip({ label, value, onRemove }) {
   return (
@@ -35,12 +40,20 @@ export default function App() {
   const [url, setUrl] = useState('');
   const [currentUrl, setCurrentUrl] = useState('');
   const [delay, setDelay] = useState('2');
-  const [isRunning, setIsRunning] = useState(false);
   const [status, setStatus] = useState('Hazır');
   const [nextButtonSelector, setNextButtonSelector] = useState(null);
   const [listItemSelector, setListItemSelector] = useState(null);
 
   const webViewRef = useRef(null);
+
+  const scraper = useScraper({
+    webViewRef,
+    nextButtonSelector,
+    listItemSelector,
+    delay,
+    onStatus: setStatus,
+  });
+  const { isRunning, currentPage, totalCollected, collectedData } = scraper;
 
   const normalizeUrl = (raw) => {
     const trimmed = raw.trim();
@@ -86,38 +99,47 @@ export default function App() {
   };
 
   const handleWebViewMessage = (event) => {
+    let data;
     try {
-      const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === 'elementPicked') {
-        console.log('[picker] seçildi:', data.target, '→', data.selector);
-        if (data.target === 'nextButton') setNextButtonSelector(data.selector);
-        else if (data.target === 'listItem') setListItemSelector(data.selector);
-        setStatus(`Seçildi (${data.target}): ${data.selector}`);
-      } else if (data.type === 'pickingStarted') {
-        setStatus(`Seçim modu açık: ${data.target}`);
-      } else if (data.type === 'error') {
-        console.warn('[picker] hata:', data.message);
-      }
+      data = JSON.parse(event.nativeEvent.data);
     } catch (e) {
       console.warn('[onMessage] parse hatası:', e, event.nativeEvent.data);
+      return;
+    }
+    // Önce scraper köprüsüne bak (requestId taşıyor mu?)
+    if (scraper.tryHandleMessage(data)) return;
+
+    // Picker mesajları
+    if (data.type === 'elementPicked') {
+      console.log('[picker] seçildi:', data.target, '→', data.selector);
+      if (data.target === 'nextButton') setNextButtonSelector(data.selector);
+      else if (data.target === 'listItem') setListItemSelector(data.selector);
+      setStatus(`Seçildi (${data.target}): ${data.selector}`);
+    } else if (data.type === 'pickingStarted') {
+      setStatus(`Seçim modu açık: ${data.target}`);
+    } else if (data.type === 'error') {
+      console.warn('[bridge] hata:', data.error || data.message);
     }
   };
 
   const handleStart = () => {
     console.log('[Başla] delay:', delay, 'sn');
-    setIsRunning(true);
-    setStatus('Çalışıyor...');
+    scraper.start();
   };
 
   const handleStop = () => {
     console.log('[Durdur]');
-    setIsRunning(false);
-    setStatus('Durduruldu');
+    scraper.stop();
   };
 
   const handleExportJson = () => {
-    console.log('[Export JSON]');
-    setStatus('JSON dışa aktarılıyor...');
+    console.log('[Export JSON] kayıt sayısı:', collectedData.length);
+    if (collectedData.length === 0) {
+      setStatus('Dışa aktarılacak veri yok');
+      return;
+    }
+    // TODO: expo-file-system + expo-sharing entegrasyonu (sonraki adım)
+    setStatus(`${collectedData.length} kayıt hazır (export henüz aktif değil)`);
   };
 
   return (
@@ -195,7 +217,9 @@ export default function App() {
             style={[styles.btn, styles.btnExport]}
             onPress={handleExportJson}
           >
-            <Text style={styles.btnText}>Export JSON</Text>
+            <Text style={styles.btnText}>
+              Export JSON{totalCollected > 0 ? ` (${totalCollected})` : ''}
+            </Text>
           </TouchableOpacity>
         </View>
 
@@ -234,8 +258,9 @@ export default function App() {
               style={styles.webView}
               originWhitelist={['*']}
               javaScriptEnabled
-              injectedJavaScriptBeforeContentLoaded={elementPickerScript}
+              injectedJavaScriptBeforeContentLoaded={injectedScripts}
               onMessage={handleWebViewMessage}
+              onLoadEnd={scraper.onWebViewLoadEnd}
             />
           ) : (
             <View style={styles.webViewPlaceholder}>
@@ -257,6 +282,13 @@ export default function App() {
           <Text style={styles.statusText} numberOfLines={1}>
             {status}
           </Text>
+          {(currentPage > 0 || totalCollected > 0) && (
+            <Text style={styles.statusMeta}>
+              {currentPage > 0 ? `s${currentPage}` : ''}
+              {currentPage > 0 && totalCollected > 0 ? ' · ' : ''}
+              {totalCollected > 0 ? `${totalCollected} kayıt` : ''}
+            </Text>
+          )}
         </View>
         </KeyboardAvoidingView>
         <StatusBar style="auto" />
@@ -453,5 +485,11 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 12,
     flex: 1,
+  },
+  statusMeta: {
+    color: '#9aa0a6',
+    fontSize: 11,
+    fontWeight: '600',
+    marginLeft: 8,
   },
 });
